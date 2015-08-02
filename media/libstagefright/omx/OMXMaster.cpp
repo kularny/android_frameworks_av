@@ -25,60 +25,55 @@
 #include <dlfcn.h>
 
 #include <media/stagefright/foundation/ADebug.h>
-#include <cutils/properties.h>
 
 namespace android {
 
-OMXMaster::OMXMaster() {
+OMXMaster::OMXMaster()
+    : mVendorLibHandle(NULL) {
     addVendorPlugin();
     addPlugin(new SoftOMXPlugin);
-    addUserPlugin();
 }
 
 OMXMaster::~OMXMaster() {
     clearPlugins();
+
+    if (mVendorLibHandle != NULL) {
+        dlclose(mVendorLibHandle);
+        mVendorLibHandle = NULL;
+    }
 }
 
 void OMXMaster::addVendorPlugin() {
     addPlugin("libstagefrighthw.so");
 }
 
-void OMXMaster::addUserPlugin() {
-    char plugin[PROPERTY_VALUE_MAX];
-    if (property_get("media.sf.omx-plugin", plugin, NULL)) {
-        if (plugin != NULL) {
-            addPlugin(plugin);
-        }
-    }
-}
-
 void OMXMaster::addPlugin(const char *libname) {
-    void* handle = dlopen(libname, RTLD_NOW);
+    mVendorLibHandle = dlopen(libname, RTLD_NOW);
 
-    if (handle == NULL) {
+    if (mVendorLibHandle == NULL) {
         return;
     }
 
     typedef OMXPluginBase *(*CreateOMXPluginFunc)();
     CreateOMXPluginFunc createOMXPlugin =
         (CreateOMXPluginFunc)dlsym(
-                handle, "createOMXPlugin");
+                mVendorLibHandle, "createOMXPlugin");
     if (!createOMXPlugin)
         createOMXPlugin = (CreateOMXPluginFunc)dlsym(
-                handle, "_ZN7android15createOMXPluginEv");
+                mVendorLibHandle, "_ZN7android15createOMXPluginEv");
 
     if (createOMXPlugin) {
-        addPlugin((*createOMXPlugin)(), handle);
+        addPlugin((*createOMXPlugin)());
     }
 }
 
-void OMXMaster::addPlugin(OMXPluginBase *plugin, void *handle) {
+void OMXMaster::addPlugin(OMXPluginBase *plugin) {
     if (plugin == 0) {
        return;
     }
     Mutex::Autolock autoLock(mLock);
 
-    mPlugins.add(plugin, handle);
+    mPlugins.push_back(plugin);
 
     OMX_U32 index = 0;
 
@@ -108,33 +103,21 @@ void OMXMaster::clearPlugins() {
     Mutex::Autolock autoLock(mLock);
 
     typedef void (*DestroyOMXPluginFunc)(OMXPluginBase*);
-
-    for (unsigned int i = 0; i < mPlugins.size(); i++) {
-        OMXPluginBase *plugin = mPlugins.keyAt(i);
-        if (plugin != NULL) {
-            void *handle = mPlugins.valueAt(i);
-            ALOGI("clearPlugins: %d key=%x value=%x", i, plugin, handle);
-
-            if (handle != NULL) {
-                DestroyOMXPluginFunc destroyOMXPlugin =
-                    (DestroyOMXPluginFunc)dlsym(
-                            handle, "destroyOMXPlugin");
-
-                if (destroyOMXPlugin)
-                    destroyOMXPlugin(plugin);
-                else
-                    delete plugin;
-
-                dlclose(handle);
-            } else {
-                delete plugin;
-            }
-
-            plugin = NULL;
-        }
-    }
+    DestroyOMXPluginFunc destroyOMXPlugin =
+        (DestroyOMXPluginFunc)dlsym(
+                mVendorLibHandle, "destroyOMXPlugin");
 
     mPluginByComponentName.clear();
+
+    for (List<OMXPluginBase *>::iterator it = mPlugins.begin();
+            it != mPlugins.end(); ++it) {
+        if (destroyOMXPlugin)
+            destroyOMXPlugin(*it);
+        else
+            delete *it;
+        *it = NULL;
+    }
+
     mPlugins.clear();
 }
 
